@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::{
   config::P2pServiceConfig,
+  grpc::server::{GrpcServerError, GrpcService},
   service::{P2pNetworkError, P2pService},
 };
 
@@ -22,6 +23,8 @@ pub enum ServerError {
   TaskJoin(#[from] JoinError),
   #[error("P2P network error: {0}")]
   P2pNetwork(#[from] P2pNetworkError),
+  #[error("Grpc server error: {0}")]
+  GrpcServer(#[from] GrpcServerError),
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -45,12 +48,17 @@ impl Server {
   }
 
   pub async fn start(&self) -> ServerResult<()> {
+    // p2p service
     let p2p_service = P2pService::new(
       P2pServiceConfig::builder()
         .with_keypair_file("./keys.keypair")
         .build(),
     );
     self.spawn_task(p2p_service).await?;
+
+    // grpc service
+    let grpc_service = GrpcService::new(9999);
+    self.spawn_task(grpc_service).await?;
 
     Ok(())
   }
