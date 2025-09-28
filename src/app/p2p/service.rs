@@ -4,21 +4,30 @@ use std::{
   time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use async_trait::async_trait;
 use libp2p::{
-  StreamProtocol, Swarm, dcutr, gossipsub, identify,
+  Multiaddr, PeerId, StreamProtocol, Swarm, TransportError, dcutr,
+  futures::StreamExt,
+  gossipsub::{self, IdentTopic, SubscriptionError},
+  identify,
   identity::{DecodingError, Keypair},
   kad::{self, store::MemoryStore},
-  mdns, noise, ping, relay,
+  mdns,
+  multiaddr::{self, Protocol},
+  noise, ping, relay,
   request_response::{self, cbor},
   swarm::NetworkBehaviour,
   tcp, yamux,
 };
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::io;
+use tokio::{io, select};
 use tokio_util::sync::CancellationToken;
 
 use crate::app::{ServerError, Service, config::P2pServiceConfig};
+
+const LOG_TARGET: &str = "app::p2p::p2pService";
 
 #[derive(Debug, Error)]
 pub enum P2pNetworkError {
@@ -32,6 +41,12 @@ pub enum P2pNetworkError {
   Libp2pNoise(#[from] libp2p::noise::Error),
   #[error("Libp2p swarm builder error: {0}")]
   Libp2pSwarmBuilder(String),
+  #[error("Parsing libp2p multiaddr error: {0}")]
+  Libp2pMultiAddrParse(#[from] multiaddr::Error),
+  #[error("Libp2p transport error: {0}")]
+  Libp2pTransport(#[from] TransportError<io::Error>),
+  #[error("Libp2p subscription error: {0}")]
+  Libp2pSubscription(#[from] SubscriptionError),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -89,15 +104,17 @@ impl P2pService {
     }
   }
 
+  /// Creating swarm with all configurations
   async fn swarm(&self) -> Result<Swarm<P2pNetworkBehaviour>, P2pNetworkError> {
     let keypair = self.keypair().await?;
-    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+    let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
       .with_tokio()
       .with_tcp(
         tcp::Config::default(),
         noise::Config::new,
         yamux::Config::default,
       )?
+      .with_quic()
       .with_relay_client(noise::Config::new, yamux::Config::default)?
       .with_behaviour(|key_pair, relay_client| {
         // kademlia config
@@ -164,14 +181,179 @@ impl P2pService {
 
     Ok(swarm)
   }
-}
+  fn handle_identify_received(
+    &self,
+    swarm: &mut Swarm<P2pNetworkBehaviour>,
+    peer_id: PeerId,
+    info: identify::Info,
+  ) -> Result<(), ServerError> {
+    let is_relay = info
+      .protocols
+      .iter()
+      .any(|protocol| *protocol == relay::HOP_PROTOCOL_NAME);
 
-use async_trait::async_trait;
+    for addr in info.listen_addrs {
+      swarm
+        .behaviour_mut()
+        .kademlia
+        .add_address(&peer_id, addr.clone());
+      swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+
+      if is_relay {
+        let listen_addr = addr
+          .clone()
+          .with_p2p(peer_id)
+          .unwrap()
+          .with(Protocol::P2pCircuit);
+        info!(target: LOG_TARGET, "Trying to listen on relay with address: {:?}", listen_addr);
+        if let Err(error) = swarm.listen_on(listen_addr.clone()) {
+          warn!(target: LOG_TARGET, "Failed to listen on relay ({listen_addr}): {error}");
+        }
+      }
+    }
+
+    Ok(())
+  }
+
+  fn handle_mdns_discovered(
+    &self,
+    swarm: &mut Swarm<P2pNetworkBehaviour>,
+    new_peers: Vec<(PeerId, Multiaddr)>,
+  ) {
+    for (peer_id, addr) in new_peers {
+      info!(target: LOG_TARGET, "[mDNS] Discover {peer_id} at {addr}");
+      swarm.add_peer_address(peer_id, addr.clone());
+      swarm
+        .behaviour_mut()
+        .kademlia
+        .add_address(&peer_id, addr.clone());
+      swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+    }
+  }
+
+  fn handle_file_download_message(
+    &self,
+    swarm: &mut Swarm<P2pNetworkBehaviour>,
+    peer_id: PeerId,
+    message: request_response::Message<FileChunkRequest, FileChunkResponse>,
+  ) {
+    match message {
+      request_response::Message::Request {
+        request_id,
+        request,
+        channel,
+      } => {
+        info!(target: LOG_TARGET, "File download request: {request:?}");
+        // TODO: implement
+      }
+      request_response::Message::Response {
+        request_id,
+        response,
+      } => {
+        info!(target: LOG_TARGET, "File download response: {response:?}");
+        // TODO: implement
+      }
+    }
+  }
+
+  fn handle_gossipsub_message(
+    &self,
+    swarm: &mut Swarm<P2pNetworkBehaviour>,
+    message: gossipsub::Message,
+  ) {
+    info!(target: LOG_TARGET, "[gossipsub] New Message: {message:?}");
+    // TODO: implement
+  }
+
+  fn log_debug<T: std::fmt::Debug>(&self, event: T) {
+    debug!(target: LOG_TARGET, "{:?}", event);
+  }
+}
 
 #[async_trait]
 impl Service for P2pService {
   async fn start(&self, cancel_token: CancellationToken) -> Result<(), ServerError> {
-    // TODO: implement
+    let mut swarm = self.swarm().await?;
+    let addr_tcp = "/ip4/0.0.0.0/tcp/0"
+      .parse()
+      .map_err(|error| ServerError::P2pNetwork(P2pNetworkError::Libp2pMultiAddrParse(error)))?;
+    let addr_udp = "/ip4/0.0.0.0/udp/0/quic-v1"
+      .parse()
+      .map_err(|error| ServerError::P2pNetwork(P2pNetworkError::Libp2pMultiAddrParse(error)))?;
+
+    swarm
+      .listen_on(addr_tcp)
+      .map_err(|error| ServerError::P2pNetwork(P2pNetworkError::Libp2pTransport(error)))?;
+    swarm
+      .listen_on(addr_udp)
+      .map_err(|error| ServerError::P2pNetwork(P2pNetworkError::Libp2pTransport(error)))?;
+
+    let file_owners_topic = IdentTopic::new("available_files");
+
+    swarm
+      .behaviour_mut()
+      .kademlia
+      .set_mode(Some(kad::Mode::Server));
+    swarm
+      .behaviour_mut()
+      .gossipsub
+      .subscribe(&file_owners_topic)
+      .map_err(|error| ServerError::P2pNetwork(P2pNetworkError::Libp2pSubscription(error)))?;
+
+    // TODO: add bootstrap peers
+
+    loop {
+      select! {
+        event = swarm.select_next_some() => match event {
+            libp2p::swarm::SwarmEvent::Behaviour(event) => match event {
+                P2pNetworkBehaviourEvent::Identify(event) => match event {
+                    identify::Event::Received { connection_id: _, peer_id, info } => self.handle_identify_received(&mut swarm, peer_id, info)?,
+                    _ => {
+                      self.log_debug(event);
+                    }
+                },
+                P2pNetworkBehaviourEvent::Mdns(event) => match event {
+                    mdns::Event::Discovered(new_peers) => self.handle_mdns_discovered(&mut swarm, new_peers),
+                    _ => {
+                      self.log_debug(event);
+                    }
+                },
+                P2pNetworkBehaviourEvent::Kademlia(event) => {
+                  self.log_debug(event);
+                },
+                P2pNetworkBehaviourEvent::Gossipsub(event) => match event {
+                    gossipsub::Event::Message { propagation_source: _, message_id: _, message } => self.handle_gossipsub_message(&mut swarm, message),
+                    _ => {
+                      self.log_debug(event);
+                    }
+                },
+                P2pNetworkBehaviourEvent::RelayServer(event) => self.log_debug(event),
+                P2pNetworkBehaviourEvent::RelayClient(event) => self.log_debug(event),
+                P2pNetworkBehaviourEvent::Dcutr(event) => self.log_debug(event),
+                P2pNetworkBehaviourEvent::FileDownload(event) => match event {
+                    request_response::Event::Message { peer, message } => self.handle_file_download_message(&mut swarm, peer, message),
+                    _ => {
+                      self.log_debug(event);
+                    }
+                },
+                _ => {
+                  self.log_debug(event);
+                }
+            },
+            libp2p::swarm::SwarmEvent::NewListenAddr { listener_id: _, address } => {
+              info!(target: LOG_TARGET, "Listening on {}", address);
+            },
+            _ => {
+                self.log_debug(event);
+            },
+        },
+        _ = cancel_token.cancelled() => {
+              info!(target: LOG_TARGET, "P2p network service shutting down...");
+          break
+        }
+      }
+    }
+
     Ok(())
   }
 }

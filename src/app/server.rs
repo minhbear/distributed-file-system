@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use log::info;
 use thiserror::Error;
 use tokio::{
   sync::Mutex,
@@ -8,12 +9,19 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::app::{config::P2pServiceConfig, service::P2pService};
+use crate::app::{
+  config::P2pServiceConfig,
+  service::{P2pNetworkError, P2pService},
+};
+
+const LOG_TARGET: &str = "app::server";
 
 #[derive(Debug, Error)]
 pub enum ServerError {
   #[error("Task join error: {0}")]
   TaskJoin(#[from] JoinError),
+  #[error("P2P network error: {0}")]
+  P2pNetwork(#[from] P2pNetworkError),
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -49,7 +57,7 @@ impl Server {
 
   /// Stops the server.
   pub async fn stop(&self) -> ServerResult<()> {
-    println!("Shutting down...");
+    info!(target: LOG_TARGET, "Shutting down...");
     self.cancel_token.cancel();
     let mut tasks = self.subtasks.lock().await;
     while let Some(res) = tasks.join_next().await {
