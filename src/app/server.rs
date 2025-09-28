@@ -3,15 +3,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
-  select,
   sync::Mutex,
   task::{JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::app::P2pService;
-
-// use super::P2pService;
 
 #[derive(Debug, Error)]
 pub enum Error {
