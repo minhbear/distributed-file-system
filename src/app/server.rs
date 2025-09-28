@@ -8,24 +8,24 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::app::P2pService;
+use crate::app::{config::P2pServiceConfig, service::P2pService};
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum ServerError {
   #[error("Task join error: {0}")]
   TaskJoin(#[from] JoinError),
 }
 
-pub type ServerResult<T> = Result<T, Error>;
+pub type ServerResult<T> = Result<T, ServerError>;
 
 pub struct Server {
   cancel_token: CancellationToken,
-  subtasks: Arc<Mutex<JoinSet<Result<(), Error>>>>,
+  subtasks: Arc<Mutex<JoinSet<Result<(), ServerError>>>>,
 }
 
 #[async_trait]
 pub trait Service: Send + Sync + 'static {
-  async fn start(&self, cancel_token: CancellationToken) -> Result<(), Error>;
+  async fn start(&self, cancel_token: CancellationToken) -> Result<(), ServerError>;
 }
 
 impl Server {
@@ -37,7 +37,11 @@ impl Server {
   }
 
   pub async fn start(&self) -> ServerResult<()> {
-    let p2p_service = P2pService::new();
+    let p2p_service = P2pService::new(
+      P2pServiceConfig::builder()
+        .with_keypair_file("./keys.keypair")
+        .build(),
+    );
     self.spawn_task(p2p_service).await?;
 
     Ok(())
