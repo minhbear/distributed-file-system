@@ -3,17 +3,15 @@ use std::net::AddrParseError;
 use log::{error, info};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Server;
+use tonic::{IntoRequest, transport::Server};
 
-use crate::app::{
-  ServerError, Service,
-  grpc::server::publish::publish_server::{Publish, PublishServer},
-};
+use crate::{app::{
+  publish::{
+    self,
+    publish_server::{Publish, PublishServer},
+  }, ServerError, Service
+}, file_processor};
 use async_trait::async_trait;
-
-pub mod publish {
-  tonic::include_proto!("publish");
-}
 
 const LOG_TARGET: &str = "app::grpc::server";
 
@@ -38,7 +36,17 @@ impl Publish for PublishService {
     &self,
     request: tonic::Request<publish::PublishFileRequest>,
   ) -> std::result::Result<tonic::Response<publish::PublishFileResponse>, tonic::Status> {
+    let request = request.into_inner();
     info!(target: LOG_TARGET, "We got a new publish file request: {request:?}");
+
+    // file processing
+    let file_processor = file_processor::Processor::new();
+    let file_process_result = file_processor.process_file(&request).await?;
+    info!(target: LOG_TARGET, "File processing result: {file_process_result:?}");
+
+    // TODO: start providing files on DHT
+
+    // TODO: start broadcasting of this file on gossipsub periodically if it's public
 
     let response = publish::PublishFileResponse {
       success: true,

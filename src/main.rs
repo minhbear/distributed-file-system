@@ -3,6 +3,7 @@ use std::sync::mpsc::channel;
 use app::Server;
 
 mod app;
+mod file_processor;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
