@@ -17,6 +17,7 @@ tokio-util = "0.7.13"
 tonic = "0.14.2"
 tonic-prost = "0.14.2"
 prost = "0.14.1"
+rs_merkle = "1.5.0"
 
 [build-dependencies]
 tonic-prost-build = "0.14.2"
