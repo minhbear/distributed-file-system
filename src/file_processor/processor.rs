@@ -2,7 +2,9 @@ use libp2p::futures::SinkExt;
 use log::info;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher, MerkleTree};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::{fs::File, io::BufReader};
@@ -11,16 +13,19 @@ use tonic::Status;
 use crate::app::publish::PublishFileRequest;
 
 const CHUNK_SIZE: usize = 1024 * 1024; // 1 MB
+pub const PROCESSING_RESULT_FILE_NAME: &str = "metadata.cbor";
+pub const CHUNK_FILES_EXTENSION: &str = "chunk";
 
 const LOG_TARGET: &str = "file_processor::processor";
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FileProcessResult {
   pub original_file_name: String,
   pub number_of_chunks: usize,
   pub chunks_directory: PathBuf,
   pub merkle_root: [u8; 32],
   pub merkle_proofs: HashMap<usize, Vec<u8>>,
+  pub public: bool,
 }
 
 impl FileProcessResult {
@@ -30,6 +35,7 @@ impl FileProcessResult {
     chunks_directory: PathBuf,
     merkle_root: [u8; 32],
     merkle_proofs: HashMap<usize, Vec<u8>>,
+    public: bool,
   ) -> Self {
     FileProcessResult {
       original_file_name,
@@ -37,7 +43,17 @@ impl FileProcessResult {
       chunks_directory,
       merkle_root,
       merkle_proofs,
+      public,
     }
+  }
+}
+
+impl Hash for FileProcessResult {
+  fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+    self.original_file_name.hash(state);
+    self.number_of_chunks.hash(state);
+    self.merkle_root.hash(state);
+    self.public.hash(state);
   }
 }
 
@@ -118,7 +134,7 @@ impl Processor {
 
       merkle_tree.insert(Sha256::hash(to_write.as_slice()));
 
-      let target_dir = pieces_dir.join(format!("{}.chunk", chunk_number));
+      let target_dir = pieces_dir.join(format!("{}.{CHUNK_FILES_EXTENSION}", chunk_number));
       tokio::fs::write(target_dir, to_write)
         .await
         .map_err(|error| Status::internal(format!("Failed to write file chunk: {error}")))?;
@@ -140,12 +156,29 @@ impl Processor {
       merkle_proofs.insert(i, proof.to_bytes());
     }
 
-    Ok(FileProcessResult::new(
+    let result = FileProcessResult::new(
       file_name.to_string(),
       chunk_number,
-      pieces_dir,
+      pieces_dir.clone(),
       merkle_root,
       merkle_proofs,
-    ))
+      request.public,
+    );
+
+    // Save result to chunks dir
+    let result_file_path = pieces_dir.join(PROCESSING_RESULT_FILE_NAME);
+    let result_file = std::fs::File::create(result_file_path.clone()).map_err(|error| {
+      Status::internal(format!(
+        "Failed to create file ({:?}): {error}",
+        result_file_path.as_path()
+      ))
+    })?;
+    serde_cbor::to_writer(result_file, &result).map_err(|error| {
+      Status::internal(format!(
+        "Failed to write to file processing result file: {error}"
+      ))
+    })?;
+
+    Ok(result)
   }
 }
