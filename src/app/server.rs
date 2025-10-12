@@ -16,6 +16,7 @@ use crate::{
     service::{P2pNetworkError, P2pService},
   },
   file_processor::FileProcessResult,
+  file_store::{self, rocksdb::RocksDbStoreError},
 };
 
 const LOG_TARGET: &str = "app::server";
@@ -28,6 +29,8 @@ pub enum ServerError {
   P2pNetwork(#[from] P2pNetworkError),
   #[error("Grpc server error: {0}")]
   GrpcServer(#[from] GrpcServerError),
+  #[error("RocksDB store error: {0}")]
+  RocksDBStore(#[from] RocksDbStoreError),
 }
 
 pub type ServerResult<T> = Result<T, ServerError>;
@@ -52,6 +55,7 @@ impl Server {
 
   pub async fn start(&self) -> ServerResult<()> {
     let (file_publish_tx, file_publish_rx) = tokio::sync::mpsc::channel::<FileProcessResult>(100);
+    let file_store = file_store::rocksdb::RocksDb::new("./file_store")?;
 
     // p2p service
     let p2p_service = P2pService::new(
@@ -59,6 +63,7 @@ impl Server {
         .with_keypair_file("./keys.keypair")
         .build(),
       file_publish_rx,
+      file_store,
     );
     self.spawn_task(p2p_service).await?;
 
