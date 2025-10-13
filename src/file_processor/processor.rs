@@ -2,9 +2,10 @@ use libp2p::futures::SinkExt;
 use log::info;
 use rs_merkle::algorithms::Sha256;
 use rs_merkle::{Hasher, MerkleTree};
+use rs_sha256::Sha256Hasher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher as _};
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::{fs::File, io::BufReader};
@@ -28,6 +29,37 @@ pub struct FileProcessResult {
   pub public: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileProcessResultHash(u64);
+
+impl FileProcessResultHash {
+  pub fn raw_hash(&self) -> u64 {
+    self.0
+  }
+
+  pub fn to_bytes(&self) -> Vec<u8> {
+    let result: [u8; 8] = self.into();
+    result.to_vec()
+  }
+}
+
+impl TryFrom<Vec<u8>> for FileProcessResultHash {
+  type Error = anyhow::Error;
+
+  fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+    let be_bytes: [u8; 8] = value
+      .try_into()
+      .map_err(|_| anyhow::anyhow!("Failed to convert big endian u64 from bytes!"))?;
+    Ok(Self(u64::from_be_bytes(be_bytes)))
+  }
+}
+
+impl From<&FileProcessResultHash> for [u8; 8] {
+  fn from(value: &FileProcessResultHash) -> Self {
+    value.0.to_be_bytes()
+  }
+}
+
 impl FileProcessResult {
   pub fn new(
     original_file_name: String,
@@ -45,6 +77,12 @@ impl FileProcessResult {
       merkle_proofs,
       public,
     }
+  }
+
+  pub fn hash_sha256(&self) -> FileProcessResultHash {
+    let mut hasher = Sha256Hasher::default();
+    self.hash(&mut hasher);
+    FileProcessResultHash(hasher.finish())
   }
 }
 

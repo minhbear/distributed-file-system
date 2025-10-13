@@ -1,7 +1,11 @@
 use std::path::PathBuf;
 
-use rocksdb::{BoundColumnFamily, ColumnFamily, ColumnFamilyDescriptor, ColumnFamilyRef, Options};
+use rocksdb::{
+  BoundColumnFamily, ColumnFamily, ColumnFamilyDescriptor, ColumnFamilyRef, IteratorMode, Options,
+};
 use thiserror::Error;
+
+use crate::file_processor::FileProcessResultHash;
 
 use super::Store;
 
@@ -50,5 +54,29 @@ impl Store for RocksDb {
       .put_cf(cf, key, value)
       .map_err(|error| RocksDbStoreError::RocksDb(error))?;
     Ok(())
+  }
+
+  fn published_file_exists(&self, file_id: u64) -> Result<bool, super::Error> {
+    let cf = self
+      .db
+      .cf_handle(PUBLISHED_FILES_COLUMN_FAMILY_NAME)
+      .ok_or(RocksDbStoreError::ColumnFamilyMissing(
+        PUBLISHED_FILES_COLUMN_FAMILY_NAME.to_string(),
+      ))?;
+    Ok(
+      self
+        .db
+        .full_iterator_cf(cf, IteratorMode::Start)
+        .filter_map(|result| {
+          if let Ok((key, _)) = result {
+            let key: Result<FileProcessResultHash, anyhow::Error> = key.to_vec().try_into();
+            if let Ok(key) = key {
+              return Some(key);
+            }
+          }
+          None
+        })
+        .any(|key| key.raw_hash() == file_id),
+    )
   }
 }

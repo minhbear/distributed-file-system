@@ -3,12 +3,16 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{file_processor::FileProcessResult, file_store::rocksdb::RocksDbStoreError};
+use crate::{
+  file_processor::{FileProcessResult, FileProcessResultHash},
+  file_store::rocksdb::RocksDbStoreError,
+};
 
 pub mod rocksdb;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PublishedFileRecord {
+  pub id: FileProcessResultHash,
   pub original_file_name: String,
   pub chunks_directory: PathBuf,
   pub public: bool,
@@ -17,6 +21,7 @@ pub struct PublishedFileRecord {
 impl From<FileProcessResult> for PublishedFileRecord {
   fn from(result: FileProcessResult) -> Self {
     Self {
+      id: result.hash_sha256(),
       original_file_name: result.original_file_name,
       chunks_directory: result.chunks_directory,
       public: result.public,
@@ -25,8 +30,14 @@ impl From<FileProcessResult> for PublishedFileRecord {
 }
 
 impl PublishedFileRecord {
-  pub fn new(original_file_name: String, chunks_directory: PathBuf, public: bool) -> Self {
+  pub fn new(
+    id: FileProcessResultHash,
+    original_file_name: String,
+    chunks_directory: PathBuf,
+    public: bool,
+  ) -> Self {
     Self {
+      id,
       original_file_name,
       chunks_directory,
       public,
@@ -34,7 +45,7 @@ impl PublishedFileRecord {
   }
 
   pub fn key(&self) -> Vec<u8> {
-    self.original_file_name.clone().into_bytes()
+    self.id.to_bytes()
   }
 }
 
@@ -54,4 +65,5 @@ pub enum Error {
 
 pub trait Store {
   fn add_published_file(&mut self, record: PublishedFileRecord) -> Result<(), Error>;
+  fn published_file_exists(&self, file_id: u64) -> Result<bool, Error>;
 }
